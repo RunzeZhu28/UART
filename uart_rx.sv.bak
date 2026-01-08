@@ -1,0 +1,112 @@
+module uart_rx_simple #(
+    parameter int CLK_HZ = 50_000_000,
+    parameter int BAUD   = 115200
+) (
+    input  logic       clk,
+    input  logic       rst,      // 高有效复位
+    input  logic       rx,
+
+    output logic [7:0] rx_data,
+    output logic       rx_valid, // 收到1字节时打一拍
+    output logic       busy,
+    output logic       frame_error
+);
+
+    localparam int DIV = CLK_HZ / BAUD; // 每bit多少clk（整数近似）
+
+    // 2级同步，减少亚稳态风险
+    logic rx_q0, rx_q1;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            rx_q0 <= 1'b1;
+            rx_q1 <= 1'b1;
+        end else begin
+            rx_q0 <= rx;
+            rx_q1 <= rx_q0;
+        end
+    end
+
+    // 下降沿检测（start bit）
+    logic rx_q1_d;
+    always_ff @(posedge clk) begin
+        if (rst) rx_q1_d <= 1'b1;
+        else     rx_q1_d <= rx_q1;
+    end
+    wire start_fall = (rx_q1_d == 1'b1) && (rx_q1 == 1'b0);
+
+    logic [$clog2(DIV+1)-1:0] cnt;
+    logic [3:0] bit_idx;
+    logic [7:0] shift;
+
+    typedef enum logic [1:0] {IDLE, DATA, STOP} state_t;
+    state_t st;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            st          <= IDLE;
+            cnt         <= '0;
+            bit_idx     <= 4'd0;
+            shift       <= 8'd0;
+            rx_data     <= 8'd0;
+            rx_valid    <= 1'b0;
+            busy        <= 1'b0;
+            frame_error <= 1'b0;
+        end else begin
+            rx_valid    <= 1'b0;   // 默认打一拍
+            frame_error <= 1'b0;
+
+            case (st)
+                IDLE: begin
+                    busy    <= 1'b0;
+                    bit_idx <= 4'd0;
+
+                    if (start_fall) begin
+                        // 半个bit后采样 bit0（居中采样）
+                        cnt  <= (DIV/2)-1;
+                        shift<= 8'd0;
+                        busy <= 1'b1;
+                        st   <= DATA;
+                    end
+                end
+
+                DATA: begin
+                    busy <= 1'b1;
+                    if (cnt != 0) begin
+                        cnt <= cnt - 1;
+                    end else begin
+                        // 采样数据位（LSB first）
+                        shift[bit_idx] <= rx_q1;
+
+                        if (bit_idx == 4'd7) begin
+                            // 下一个采样点是 stop bit
+                            cnt     <= DIV-1;
+                            st      <= STOP;
+                        end else begin
+                            bit_idx <= bit_idx + 1;
+                            cnt     <= DIV-1;
+                        end
+                    end
+                end
+
+                STOP: begin
+                    busy <= 1'b1;
+                    if (cnt != 0) begin
+                        cnt <= cnt - 1;
+                    end else begin
+                        // stop bit 应为 1
+                        if (rx_q1 == 1'b1) begin
+                            rx_data  <= shift;
+                            rx_valid <= 1'b1; // 收到一个字节
+                        end else begin
+                            frame_error <= 1'b1;
+                        end
+                        st <= IDLE;
+                    end
+                end
+
+                default: st <= IDLE;
+            endcase
+        end
+    end
+
+endmodule

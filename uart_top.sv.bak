@@ -1,0 +1,159 @@
+module uart (
+    input  wire        CLOCK_50,
+    input  wire [3:0]  KEY,
+    output wire [9:0]  LEDR,
+
+    input  wire        UART_TX,   // 你QSF里已验证：PIN_E9
+    output wire        UART_RX   // 你QSF里已验证：PIN_D9
+
+//    output wire        UART_RTS,  // PIN_B8, active low
+//    input  wire        UART_CTS   // PIN_C8, active low
+);
+
+    wire rst = ~KEY[0]; // KEY0按下复位（高有效给核）
+    assign UART_RTS = 1'b0; // 始终ready，避免流控影响
+	 wire UART_RTS;
+	 wire UART_CTS;
+    // UART core AXI-stream
+    wire [7:0] rx_tdata;
+    wire       rx_tvalid;
+    wire       rx_tready = 1'b1;
+
+    reg  [7:0] tx_tdata;
+    reg        tx_tvalid;
+    wire       tx_tready;
+
+    wire tx_busy, rx_busy, rx_overrun_error, rx_frame_error;
+
+    // 50MHz/(115200*8) ≈ 54.25 -> 54
+    wire [15:0] prescale = 16'd54;
+
+    uart_combined #(.DATA_WIDTH(8)) uart_inst (
+        .clk(CLOCK_50),
+        .rst(rst),
+
+        .s_axis_tdata(tx_tdata),
+        .s_axis_tvalid(tx_tvalid),
+        .s_axis_tready(tx_tready),
+
+        .m_axis_tdata(rx_tdata),
+        .m_axis_tvalid(rx_tvalid),
+        .m_axis_tready(rx_tready),
+
+        .rxd(UART_TX),
+        .txd(UART_RX),
+
+        .tx_busy(tx_busy),
+        .rx_busy(rx_busy),
+        .rx_overrun_error(rx_overrun_error),
+        .rx_frame_error(rx_frame_error),
+
+        .prescale(prescale)
+    );
+
+    // =========================
+    // RX: any byte -> flash LEDR0
+    // =========================
+    reg [23:0] led_timer;
+    always @(posedge CLOCK_50) begin
+        if (rst) begin
+            led_timer <= 24'd0;
+        end else begin
+            if (rx_tvalid) begin
+                led_timer <= 24'd5_000_000; // ~0.1s
+            end else if (led_timer != 0) begin
+                led_timer <= led_timer - 1'b1;
+            end
+        end
+    end
+
+    assign LEDR[0] = (led_timer != 0);
+    assign LEDR[1] = tx_busy;
+    assign LEDR[2] = rx_frame_error;
+    assign LEDR[3] = rx_overrun_error;
+    assign LEDR[8:4] = 5'b0;
+    assign LEDR[9] = ~rst;
+
+    // =========================
+    // KEY1 falling edge detect (press once -> pulse)
+    // KEY1按下为0，所以检测 1->0
+    // =========================
+    reg key1_d;
+    wire key1_pulse = key1_d & ~KEY[1];
+
+    always @(posedge CLOCK_50) begin
+        if (rst) key1_d <= 1'b1;
+        else     key1_d <= KEY[1];
+    end
+
+    // =========================
+    // TX message sender
+    // =========================
+    function [7:0] msg_byte(input [5:0] i);
+        begin
+            case (i)
+                0:  msg_byte = "H";
+                1:  msg_byte = "e";
+                2:  msg_byte = "l";
+                3:  msg_byte = "l";
+                4:  msg_byte = "o";
+                5:  msg_byte = " ";
+                6:  msg_byte = "f";
+                7:  msg_byte = "r";
+                8:  msg_byte = "o";
+                9:  msg_byte = "m";
+                10: msg_byte = " ";
+                11: msg_byte = "D";
+                12: msg_byte = "E";
+                13: msg_byte = "1";
+                14: msg_byte = "-";
+                15: msg_byte = "S";
+                16: msg_byte = "o";
+                17: msg_byte = "C";
+                18: msg_byte = "!";
+                19: msg_byte = 8'h0D; // \r
+                20: msg_byte = 8'h0A; // \n
+                default: msg_byte = 8'h00;
+            endcase
+        end
+    endfunction
+    localparam MSG_LEN = 21;
+
+    reg        sending;
+    reg [5:0]  idx;
+
+    always @(posedge CLOCK_50) begin
+        if (rst) begin
+            tx_tdata  <= 8'd0;
+            tx_tvalid <= 1'b0;
+            sending   <= 1'b0;
+            idx       <= 6'd0;
+        end else begin
+            // 完成握手后拉低valid
+            if (tx_tvalid && tx_tready) begin
+                tx_tvalid <= 1'b0;
+            end
+
+            // 按KEY1触发一次发送
+            if (!sending && key1_pulse) begin
+                sending <= 1'b1;
+                idx     <= 6'd0;
+            end
+
+            // 逐字节发送
+            if (sending) begin
+                if (!tx_tvalid && tx_tready) begin
+                    tx_tdata  <= msg_byte(idx);
+                    tx_tvalid <= 1'b1;
+
+                    if (idx == MSG_LEN-1) sending <= 1'b0;
+                    else                  idx <= idx + 1'b1;
+                end
+            end
+        end
+    end
+
+    // 保留CTS输入（目前不使用）
+    wire _unused = UART_CTS;
+
+endmodule
