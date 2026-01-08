@@ -41,7 +41,7 @@ uart_tx_inst (
     .i_data(i_data_s),
     .i_valid(i_valid_s),
     .o_ready(o_ready_s),
-    .o_  txd(o_txd),
+    .o_txd(o_txd),
     .o_busy(o_tx_busy)
 );
 
